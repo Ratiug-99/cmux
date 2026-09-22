@@ -1845,7 +1845,8 @@ final class ClaudeHookSessionStore {
         incomingPID: Int?,
         includeTerminalPromptTurnIds: Bool = true
     ) -> Bool {
-        if max(record.activePromptDepth ?? 0, record.activePromptTurnIds?.count ?? 0) > 0 {
+        if max(record.activePromptDepth ?? 0, record.activePromptTurnIds?.count ?? 0) > 0,
+           codexRecordedTurnOwnerMayStillBeAlive(record) {
             return true
         }
         let hasCompletedTurnState = normalizeOptional(record.lastPromptTurnId) != nil
@@ -1855,7 +1856,22 @@ final class ClaudeHookSessionStore {
               let existingPID = record.pid else {
             return false
         }
-        return incomingPID == existingPID
+        guard incomingPID == existingPID else { return false }
+        return !authoritativeSessionStartProcessIsNewer(incomingPID, than: record)
+    }
+
+    private func codexRecordedTurnOwnerMayStillBeAlive(
+        _ record: ClaudeHookSessionRecord
+    ) -> Bool {
+        guard let recordedPID = record.pid else { return true }
+        guard Self.processExists(recordedPID) else { return false }
+        guard let recordedSeconds = record.pidStartSeconds,
+              let recordedMicroseconds = record.pidStartMicroseconds,
+              let currentIdentity = processStartIdentity(pid: recordedPID) else {
+            return true
+        }
+        return currentIdentity.seconds == recordedSeconds
+            && currentIdentity.microseconds == recordedMicroseconds
     }
 
     private func clearCodexSessionStartTurnState(on record: inout ClaudeHookSessionRecord) {
