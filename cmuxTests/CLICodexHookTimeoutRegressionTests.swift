@@ -828,6 +828,7 @@ struct CLICodexHookTimeoutRegressionTests {
         let workspaceId = "11111111-1111-1111-1111-111111111111"
         let surfaceId = "22222222-2222-2222-2222-222222222222"
         let sessionId = "codex-start-session"
+        let livePID = Int(getpid())
         let stateURL = root.appendingPathComponent("codex-hook-sessions.json")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let transcriptURL = root.appendingPathComponent("rollout-\(sessionId).jsonl")
@@ -848,6 +849,7 @@ struct CLICodexHookTimeoutRegressionTests {
                     "workspaceId": workspaceId,
                     "surfaceId": surfaceId,
                     "cwd": root.path,
+                    "pid": livePID,
                     "agentLifecycle": "running",
                     "runtimeStatus": "running",
                     "activePromptDepth": 1,
@@ -867,7 +869,7 @@ struct CLICodexHookTimeoutRegressionTests {
             surfaceId: surfaceId,
             connectionLimit: 8,
             processBinding: CodexHookMockProcessBinding(
-                processID: 2,
+                processID: livePID,
                 workspaceID: workspaceId,
                 surfaceID: surfaceId
             )
@@ -885,7 +887,7 @@ struct CLICodexHookTimeoutRegressionTests {
                 "CMUX_SURFACE_ID": surfaceId,
                 "CMUX_AGENT_HOOK_STATE_DIR": root.path,
                 "CMUX_CLI_SENTRY_DISABLED": "1",
-                "CMUX_CODEX_PID": "2",
+                "CMUX_CODEX_PID": String(livePID),
             ],
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","transcript_path":"\#(transcriptURL.path)","hook_event_name":"SessionStart"}"#,
             timeout: 5
@@ -909,6 +911,134 @@ struct CLICodexHookTimeoutRegressionTests {
         #expect(session["agentLifecycle"] as? String == "running")
         #expect(session["runtimeStatus"] as? String == "running")
         #expect(session["activePromptTurnIds"] as? [String] == ["turn-active"])
+    }
+
+    @Test func codexSessionStartRecoversActiveTurnOwnedByDeadProcessAfterRestart() throws {
+        let cliPath = try bundledCLIPath()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-codex-dead-turn-restart-\(UUID().uuidString)", isDirectory: true)
+        let socketPath = makeCodexHookSocketPath("codex-dead-turn")
+        let listenerFD = try bindCodexHookUnixSocket(at: socketPath)
+        let commands = CodexHookCapturedSocketCommands()
+        let workspaceId = "11111111-1111-1111-1111-111111111111"
+        let surfaceId = "22222222-2222-2222-2222-222222222222"
+        let sessionId = "codex-dead-turn-session"
+        let incomingPID = Int(getpid())
+        let deadPID = Int(Int32.max)
+        let stateURL = root.appendingPathComponent("codex-hook-sessions.json")
+        let codexHome = root.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let rolloutDirectory = codexHome.appendingPathComponent(
+            "sessions/2026/09/22",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: rolloutDirectory, withIntermediateDirectories: true)
+        let rollout: [String: Any] = [
+            "type": "session_meta",
+            "payload": [
+                "id": sessionId,
+                "cwd": root.path,
+                "source": "cli",
+                "originator": "codex-tui",
+            ],
+        ]
+        let rolloutData = try JSONSerialization.data(withJSONObject: rollout, options: [.sortedKeys])
+        let transcriptURL = rolloutDirectory.appendingPathComponent("rollout-\(sessionId).jsonl")
+        try rolloutData.write(to: transcriptURL, options: .atomic)
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        #expect(kill(pid_t(deadPID), 0) == -1)
+        #expect(errno == ESRCH)
+
+        let now = Date().timeIntervalSince1970
+        let store: [String: Any] = [
+            "version": 1,
+            "sessions": [
+                sessionId: [
+                    "sessionId": sessionId,
+                    "workspaceId": workspaceId,
+                    "surfaceId": surfaceId,
+                    "cwd": root.path,
+                    "pid": deadPID,
+                    "agentLifecycle": "idle",
+                    "runtimeStatus": "idle",
+                    "hookEventName": "Stop",
+                    "activePromptDepth": 1,
+                    "activePromptTurnId": "turn-stale",
+                    "activePromptTurnIds": ["turn-stale"],
+                    "lastPromptTurnId": "turn-stale",
+                    "startedAt": now,
+                    "updatedAt": now,
+                ],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: store, options: [.prettyPrinted, .sortedKeys])
+            .write(to: stateURL, options: .atomic)
+        startCodexHookMockSocketServerAccepting(
+            listenerFD: listenerFD,
+            commands: commands,
+            surfaceId: surfaceId,
+            connectionLimit: 12,
+            processBinding: CodexHookMockProcessBinding(
+                processID: incomingPID,
+                workspaceID: workspaceId,
+                surfaceID: surfaceId
+            )
+        )
+
+        let result = runCodexHookProcess(
+            executablePath: cliPath,
+            arguments: ["hooks", "codex", "session-start"],
+            environment: [
+                "HOME": root.path,
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "PWD": root.path,
+                "CODEX_HOME": codexHome.path,
+                "CMUX_SOCKET_PATH": socketPath,
+                "CMUX_WORKSPACE_ID": workspaceId,
+                "CMUX_SURFACE_ID": surfaceId,
+                "CMUX_AGENT_HOOK_STATE_DIR": root.path,
+                "CMUX_CLI_SENTRY_DISABLED": "1",
+                "CMUX_CODEX_PID": String(incomingPID),
+            ],
+            standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","transcript_path":"\#(transcriptURL.path)","hook_event_name":"SessionStart"}"#,
+            timeout: 5
+        )
+
+        #expect(!result.timedOut, Comment(rawValue: result.stderr))
+        #expect(result.status == 0, Comment(rawValue: result.stderr))
+        #expect(result.stdout == "{}\n")
+        let sentCommands = commands.snapshot()
+        #expect(AgentJournalAppendCapture.contains(sentCommands, kind: "agent.session.started", agentKey: "codex"))
+        let resumeSet = try #require(
+            sentCommands.compactMap(codexHookJSONObject).first {
+                $0["method"] as? String == "surface.resume.set"
+            }
+        )
+        let resumeParams = try #require(resumeSet["params"] as? [String: Any])
+        #expect(resumeParams["auto_resume"] as? Bool == true)
+        #expect(
+            sentCommands.contains {
+                $0.hasPrefix("set_agent_pid ") && $0.contains(" \(incomingPID) ")
+            }
+        )
+
+        let saved = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any]
+        )
+        let sessions = try #require(saved["sessions"] as? [String: Any])
+        let session = try #require(sessions[sessionId] as? [String: Any])
+        #expect(session["pid"] as? Int == incomingPID)
+        #expect(session["agentLifecycle"] as? String == "unknown")
+        #expect(session["runtimeStatus"] as? String == "running")
+        #expect(session["activePromptDepth"] == nil)
+        #expect(session["activePromptTurnId"] == nil)
+        #expect(session["activePromptTurnIds"] == nil)
+        #expect(session["lastPromptTurnId"] == nil)
     }
 
     @Test func codexSessionStartRefreshesCompletedPriorTurn() throws {
