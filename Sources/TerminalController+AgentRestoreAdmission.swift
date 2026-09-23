@@ -95,30 +95,48 @@ extension TerminalController {
             )
         }
 
-        let index: RestorableAgentSessionIndex
-        switch await SharedLiveAgentIndex.shared.indexForOwnershipDecision() {
-        case .index(let refreshedIndex):
-            index = refreshedIndex
-        case .timedOut:
-            return Self.agentRestoreAdmissionResponse(
-                request: request,
-                inputs: inputs,
-                decision: .unverifiable(.scanTimedOut),
-                startedAt: admissionStart
-            )
-        case .cancelled:
-            return Self.agentRestoreAdmissionResponse(
-                request: request,
-                inputs: inputs,
-                decision: .unverifiable(.scanCancelled),
-                startedAt: admissionStart
-            )
+        // Depott: at app launch every restored pane spawns a login shell at once,
+        // so the process census behind the index is often incomplete on the first
+        // scan (reported as "hook store unreadable" although the store is fine).
+        // Re-scan a few times before refusing, instead of stranding the agent.
+        var index: RestorableAgentSessionIndex?
+        for attempt in 0..<8 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard !Task.isCancelled else { break }
+            }
+            switch await SharedLiveAgentIndex.shared.indexForOwnershipDecision() {
+            case .index(let refreshedIndex):
+                if refreshedIndex.isComplete(
+                    forWorkspaceId: inputs.workspaceID,
+                    panelId: inputs.surfaceID,
+                    kind: inputs.kind
+                ) {
+                    index = refreshedIndex
+                } else {
+#if DEBUG
+                    cmuxDebugLog("depott.admission.retry attempt=\(attempt) surface=\(inputs.surfaceID.uuidString.prefix(5)) reason=incompleteIndex")
+#endif
+                    continue
+                }
+            case .timedOut:
+                return Self.agentRestoreAdmissionResponse(
+                    request: request,
+                    inputs: inputs,
+                    decision: .unverifiable(.scanTimedOut),
+                    startedAt: admissionStart
+                )
+            case .cancelled:
+                return Self.agentRestoreAdmissionResponse(
+                    request: request,
+                    inputs: inputs,
+                    decision: .unverifiable(.scanCancelled),
+                    startedAt: admissionStart
+                )
+            }
+            if index != nil { break }
         }
-        guard index.isComplete(
-            forWorkspaceId: inputs.workspaceID,
-            panelId: inputs.surfaceID,
-            kind: inputs.kind
-        ) else {
+        guard let index else {
             return Self.agentRestoreAdmissionResponse(
                 request: request,
                 inputs: inputs,

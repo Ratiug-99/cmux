@@ -618,6 +618,16 @@ extension Workspace {
                         kind: bindingKind.rawValue,
                         sessionId: bindingSessionId
                     )
+                    // Depott: a hook observation for exactly this binding's session,
+                    // already validated on pid start identity, surface scope and
+                    // executable, proves the agent is live even when the cached
+                    // restored-agent snapshot was cleared (e.g. the user relaunched
+                    // the agent by hand in a restored pane).
+                    if effectiveRestorableAgent == nil,
+                       let matchingObservation,
+                       matchingObservation.processLiveness == .running {
+                        return true
+                    }
                     guard let effectiveRestorableAgent,
                           effectiveRestorableAgent.kind.rawValue == bindingKind.rawValue,
                           ManagedAgentSessionIdentity.sessionIDsMatch(
@@ -656,6 +666,20 @@ extension Workspace {
                         processPresence: agentProcessPresence
                     )
             }()
+#if DEBUG
+            if let resumeBinding, resumeBinding.isAgentHookBinding {
+                let obs = restorableAgentObservation
+                cmuxDebugLog(
+                    "depott.save.agentRunning panel=\(panelId.uuidString.prefix(5)) " +
+                        "value=\(agentWasRunning.map(String.init(describing:)) ?? "nil") " +
+                        "binding=\(resumeBinding.kind ?? "-")/\(resumeBinding.checkpointId?.prefix(8) ?? "-") " +
+                        "effectiveAgent=\(effectiveRestorableAgent.map { "\($0.kind.rawValue)/\($0.sessionId.prefix(8))" } ?? "nil") " +
+                        "observation=\(obs.map { "\($0.snapshot.kind.rawValue)/\($0.snapshot.sessionId.prefix(8)) liveness=\($0.processLiveness) pids=\($0.agentProcessIdentities.keys.sorted())" } ?? "nil") " +
+                        "lifecycleConfirms=\(restoredAgentLifecycleConfirmsRunning(resumeBinding, panelId: panelId)) " +
+                        "shell=\(panelShellActivityStates[panelId].map(String.init(describing:)) ?? "nil")"
+                )
+            }
+#endif
             let resumeStartupInput = localTmuxStartCommand == nil
                 ? sessionRestorePolicy.surfaceResumeStartupInput(
                     resumeBinding,
@@ -1703,6 +1727,18 @@ extension Workspace {
                 promptForApproval: true,
                 approvalStoreURL: SurfaceResumeApprovalStore.defaultURL()
             )
+#if DEBUG
+            if resumeBinding?.isAgentHookBinding == true {
+                cmuxDebugLog(
+                    "depott.restore.gate panel=\(snapshot.id.uuidString.prefix(5)) " +
+                        "wasRunning=\(agentWasRunningAtQuit) auto=\(shouldAutoResumeAgent) " +
+                        "indexUnavailable=\(restoreIndexUnavailable) ambiguous=\(restoreOwnershipAmbiguous) " +
+                        "uncertain=\(stablePanelHasUncertainProcess) liveOwner=\(liveSessionOwner != nil) " +
+                        "stableLive=\(stablePanelHasLiveProcess) hibernation=\(restoredHibernation != nil) " +
+                        "forStartup=\(resumeBindingForStartup != nil) approved=\(effectiveResumeBindingForStartup != nil)"
+                )
+            }
+#endif
             let restoredPersistentSSHResumeCommand: String? = if let restoredRemotePTYSessionID {
                 persistentSSHResumeCommand(
                     for: effectiveResumeBindingForStartup,

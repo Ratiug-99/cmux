@@ -1880,8 +1880,26 @@ struct RestorableAgentSessionIndex: Sendable {
                 guard fileManager.fileExists(atPath: fileURL.path) else {
                     continue
                 }
-                guard let data = try? Data(contentsOf: fileURL),
-                      let state = try? decoder.decode(RestorableAgentHookSessionStoreFile.self, from: data) else {
+                let storeData = try? Data(contentsOf: fileURL)
+                let decodedState: RestorableAgentHookSessionStoreFile?
+                var decodeError: Error?
+                if let storeData {
+                    do {
+                        decodedState = try decoder.decode(RestorableAgentHookSessionStoreFile.self, from: storeData)
+                    } catch {
+                        decodeError = error
+                        decodedState = nil
+                    }
+                } else {
+                    decodedState = nil
+                }
+                guard let state = decodedState else {
+#if DEBUG
+                    cmuxDebugLog(
+                        "depott.index.storeIncomplete kind=\(kind.rawValue) reason=decode " +
+                            "bytes=\(storeData?.count ?? -1) error=\(String(describing: decodeError).prefix(300))"
+                    )
+#endif
                     incompleteHookStoreKinds.insert(kind)
                     continue
                 }
@@ -1913,6 +1931,13 @@ struct RestorableAgentSessionIndex: Sendable {
                 guard !normalizedSessionId.isEmpty,
                       let workspaceId = UUID(uuidString: effectiveRecord.workspaceId),
                       let panelId = UUID(uuidString: effectiveRecord.surfaceId) else {
+#if DEBUG
+                    cmuxDebugLog(
+                        "depott.index.storeIncomplete kind=\(kind.rawValue) reason=badRecord " +
+                            "session=\(normalizedSessionId.prefix(8)) ws=\(effectiveRecord.workspaceId.prefix(8)) " +
+                            "surface=\(effectiveRecord.surfaceId.prefix(8))"
+                    )
+#endif
                     incompleteHookStoreKinds.insert(kind)
                     continue
                 }
@@ -3418,30 +3443,50 @@ struct RestorableAgentSessionIndex: Sendable {
         validator: CachedAgentProcessIdentityValidator,
         hermesSessionValidation: CachedAgentProcessIdentityValidator.HermesSessionValidation = .cachedSnapshot
     ) -> RestorableAgentProcessMatch {
+        func depottTrace(_ step: String) {
+#if DEBUG
+            cmuxDebugLog("depott.scopedMatch pid=\(processID) panel=\(panelId.uuidString.prefix(5)) step=\(step) recorded=\(recordedProcessIdentity.map { "\($0.pid):\($0.startSeconds):\($0.startMicroseconds)" } ?? "nil") current=\(currentProcessIdentity.map { "\($0.pid):\($0.startSeconds):\($0.startMicroseconds)" } ?? "nil")")
+#endif
+        }
         guard let recordedProcessIdentity,
               Int(recordedProcessIdentity.pid) == processID else {
+            depottTrace("noRecordedIdentity")
             return processPresenceProvider(processID) == .absent ? .mismatches : .unknown
         }
         guard let currentProcessIdentity,
               Int(currentProcessIdentity.pid) == processID else {
+            depottTrace("noCurrentIdentity")
             return processPresenceProvider(processID) == .absent ? .mismatches : .unknown
         }
         guard currentProcessIdentity == recordedProcessIdentity else {
+            depottTrace("identityMismatch")
             return .mismatches
         }
         guard let process = processArgumentsProvider(processID) else {
+            depottTrace("noArguments")
             // A present process may be temporarily uninspectable. Only ESRCH-grade
             // absence proves that the recorded generation exited.
             return processPresenceProvider(processID) == .absent ? .mismatches : .unknown
         }
-        guard process.matchesCMUXScope(workspaceId: workspaceId, surfaceId: panelId) else {
+        // Depott: Grid moves carry a surface into another workspace, but the
+        // agent process keeps the CMUX_WORKSPACE_ID it was launched with. Surface
+        // ids are unique UUIDs, so a surface match alone scopes the process.
+        let surfaceScopeMatches = CmuxTopProcessSnapshot
+            .cmuxScope(arguments: process.arguments, environment: process.environment)?
+            .surfaceID == panelId
+        guard process.matchesCMUXScope(workspaceId: workspaceId, surfaceId: panelId) || surfaceScopeMatches else {
+            depottTrace("scopeMismatch ws=\(process.environment["CMUX_WORKSPACE_ID"] ?? "nil") surf=\(process.environment["CMUX_SURFACE_ID"] ?? "nil") argv0=\(process.arguments.first ?? "nil")")
             return .mismatches
         }
-        return validator.currentProcess(
+        let validated = validator.currentProcess(
             process,
             matches: snapshot,
             hermesSessionValidation: hermesSessionValidation
-        ) ? .matches : .mismatches
+        )
+        if !validated {
+            depottTrace("validatorRejected kind=\(process.environment["CMUX_AGENT_LAUNCH_KIND"] ?? "nil") argv=\(process.arguments.prefix(4).joined(separator: " ").prefix(160)) launcher=\(snapshot.launchCommand?.launcher ?? "nil")")
+        }
+        return validated ? .matches : .mismatches
     }
 
     private static func normalizedNonEmptyValue(_ value: String?) -> String? {

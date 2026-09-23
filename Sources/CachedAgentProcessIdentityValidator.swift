@@ -208,11 +208,20 @@ struct CachedAgentProcessIdentityValidator: Sendable {
         guard let observedSessionID else {
             return hermesSessionValidation.vouchesForMissingSessionIdentity
         }
-        return ManagedAgentSessionIdentity.sessionIDsMatch(
+        if ManagedAgentSessionIdentity.sessionIDsMatch(
             kind: snapshot.kind.rawValue,
             lhs: observedSessionID,
             rhs: snapshot.sessionId
-        )
+        ) {
+            return true
+        }
+        // Depott: Claude switches conversations in-process (`/resume`, `/clear`)
+        // without changing its PID or argv, so the wrapper-injected
+        // `--session-id` goes stale while SessionStart hooks report the new
+        // session. Callers only reach this after the process generation matched
+        // on pid start identity, cmux scope and executable, so the hook-reported
+        // session wins over launch argv.
+        return snapshot.kind == .claude
     }
 
     private static func hasEnabledForkSessionFlag(in arguments: [String]) -> Bool {

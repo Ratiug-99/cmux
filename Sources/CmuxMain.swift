@@ -19,6 +19,7 @@ enum CmuxMain {
     /// Raises inherited descriptor limits before receipt writing or worker routing.
     static func main() {
         FileDescriptorLimitController().raiseSoftLimitIfNeeded()
+        depottIsolateAgentHookState()
         AppHostProcessReceipt.writeIfRequired()
 #if DEBUG
         // Bonsplit's `dlog` and the app's `cmuxDebugLog` resolve the same
@@ -31,5 +32,27 @@ enum CmuxMain {
         CmuxWorkerEntrypoint(arguments: CommandLine.arguments).runIfRequested()
         SurfaceResumeApprovalStore.preloadSigningSecret()
         cmuxApp.main()
+    }
+
+    /// Depott: keep agent hook state out of `~/.cmuxterm`, which a side-by-side
+    /// upstream cmux also rewrites. An older cmux CLI re-encodes the shared
+    /// `claude-hook-sessions.json` without `pidStartSeconds`, so restore can
+    /// never prove Depott's agents were running and never auto-resumes them.
+    /// Terminals and hook CLIs inherit the override from this process.
+    private static func depottIsolateAgentHookState() {
+        let environment = ProcessInfo.processInfo.environment
+        if let existing = environment["CMUX_AGENT_HOOK_STATE_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+            return
+        }
+        let fileManager = FileManager.default
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let stateDirectory = home.appendingPathComponent(".depott/agent-state", isDirectory: true)
+        try? fileManager.createDirectory(
+            at: stateDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        setenv("CMUX_AGENT_HOOK_STATE_DIR", stateDirectory.path, 1)
     }
 }
