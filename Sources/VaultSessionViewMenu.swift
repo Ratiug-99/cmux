@@ -42,6 +42,8 @@ final class VaultSessionViewMenuPresenter {
     @discardableResult
     func present(
         isCompactView: Bool,
+        sort: VaultSessionSort? = nil,
+        onSelectSort: (@MainActor (VaultSessionSort) -> Void)? = nil,
         onSelect: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
         guard let anchorView else { return false }
@@ -54,6 +56,18 @@ final class VaultSessionViewMenuPresenter {
             }
             item.state = option.isCompact == isCompactView ? .on : .off
             menu.addItem(item)
+        }
+        if let sort, let onSelectSort {
+            menu.addItem(.separator())
+            let sortTitle = String(localized: "sessionIndex.sort.title", defaultValue: "Sort by")
+            menu.addItem(.sectionHeader(title: sortTitle))
+            for option in [VaultSessionSort.lastActivity, .size, .created, .duration, .folder] {
+                let item = SidebarRowClosureMenuItem(title: option.label) {
+                    onSelectSort(option)
+                }
+                item.state = option == sort ? .on : .off
+                menu.addItem(item)
+            }
         }
         menu.popUp(
             positioning: nil,

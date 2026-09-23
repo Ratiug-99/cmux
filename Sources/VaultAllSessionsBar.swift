@@ -9,6 +9,8 @@ struct VaultAllSessionsBar: View {
     /// Shared row-density preference. Default view shows repository/branch
     /// details; compact view hides that second line in every Vault grouping.
     @Binding var isCompactView: Bool
+    /// Depott: sort for the Recent grouping (Last activity, Size, ...).
+    @Binding var sort: VaultSessionSort
     /// Enter — peek the top search result.
     let onPeekTopResult: () -> Void
     /// Cmd+Enter — resume the top search result.
@@ -59,7 +61,11 @@ struct VaultAllSessionsBar: View {
     /// treatment. The Default / Compact picker opens as a native menu below it.
     private var viewMenuButton: some View {
         Button {
-            viewMenuPresenter.present(isCompactView: isCompactView) { isCompactView = $0 }
+            viewMenuPresenter.present(
+                isCompactView: isCompactView,
+                sort: sort,
+                onSelectSort: { sort = $0 }
+            ) { isCompactView = $0 }
         } label: {
             HeaderChromeIconStyle.symbol("ellipsis")
         }

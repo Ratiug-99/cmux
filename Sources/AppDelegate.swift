@@ -5681,7 +5681,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @discardableResult
-    func moveSurface(
+    /// Depott: callers go through `moveSurface(...)` in
+    /// AppDelegate+MoveTabToNewWorkspace.swift, which records Grid membership.
+    func depottUnwrappedMoveSurface(
         panelId: UUID,
         toWorkspace targetWorkspaceId: UUID,
         targetPane: PaneID? = nil,

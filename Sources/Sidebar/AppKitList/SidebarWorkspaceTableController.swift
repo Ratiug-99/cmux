@@ -1751,12 +1751,52 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
     /// the release position.
     private var suppressSelectedScrollAfterLocalDrop = false
 
+    /// Depott: workspace row the dragged row would merge into (pointer over the
+    /// middle of that row) instead of reordering between rows.
+    private var depottMergeTargetWorkspaceId: UUID?
+
+    /// Middle band of a row = merge; the outer quarters keep reorder behavior.
+    private func depottMergeTarget(
+        point: CGPoint,
+        targets: [SidebarWorkspaceReorderDropOverlay.Target],
+        draggedWorkspaceId: UUID?
+    ) -> UUID? {
+        guard let draggedWorkspaceId,
+              let target = targets.first(where: { !$0.isGroupHeader && $0.frame.contains(point) }),
+              target.workspaceId != draggedWorkspaceId else { return nil }
+        let band = target.frame.height * 0.25
+        guard point.y > target.frame.minY + band, point.y < target.frame.maxY - band,
+              AppDelegate.shared?.depottCanDropWorkspace(draggedWorkspaceId, ontoWorkspace: target.workspaceId) == true
+        else { return nil }
+        return target.workspaceId
+    }
+
+    private func depottPaintMergeTarget(_ workspaceId: UUID?) {
+        guard depottMergeTargetWorkspaceId != workspaceId else { return }
+        depottMergeTargetWorkspaceId = workspaceId
+        guard let table = containerView?.tableView else { return }
+        let visible = table.rows(in: table.visibleRect)
+        guard visible.length > 0 else { return }
+        for row in visible.lowerBound..<(visible.lowerBound + visible.length) where rows.indices.contains(row) {
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? SidebarWorkspaceRowTableCellView else { continue }
+            let isTarget = workspaceId != nil && rows[row].workspaceId == workspaceId
+            cell.paintControllerDropIndicator(top: isTarget, bottom: isTarget)
+        }
+    }
+
     private func performReorderDrop(
         point: CGPoint,
         targets: [SidebarWorkspaceReorderDropOverlay.Target],
         payloadWorkspaceId: UUID?
     ) -> Bool {
         reorderDragWindowPoint = nil
+        if let mergeTarget = depottMergeTargetWorkspaceId {
+            depottPaintMergeTarget(nil)
+            retireReorderIndicator()
+            guard let dragged = payloadWorkspaceId else { return false }
+            return AppDelegate.shared?.depottMergeWorkspace(dragged, into: mergeTarget) ?? false
+        }
         guard let actions else {
             retireReorderIndicator()
             return false
@@ -1789,6 +1829,7 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
     }
 
     func reorderDropDragExited() {
+        depottPaintMergeTarget(nil)
         reorderDragPayloadWorkspaceId = nil
         guard reorderDragWindowPoint != nil || reorderIndicatorPainter != nil else { return }
         reorderDragWindowPoint = nil
@@ -1827,6 +1868,17 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
             return false
         }
         reorderDragPayloadWorkspaceId = payloadWorkspaceId
+        if let mergeTarget = depottMergeTarget(
+            point: point,
+            targets: targets,
+            draggedWorkspaceId: payloadWorkspaceId
+        ) {
+            retireReorderIndicator()
+            depottPaintMergeTarget(mergeTarget)
+            reorderDragWindowPoint = windowPoint
+            return true
+        }
+        depottPaintMergeTarget(nil)
         guard !targets.isEmpty,
               let update = actions.updateWorkspaceDrag(
                   point,
@@ -2823,6 +2875,12 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
         }
         reorder.performPendingDropAtPoint = { [weak self] pendingDrop, _ in
             guard let self else { return false }
+            if let mergeTarget = self.depottMergeTargetWorkspaceId,
+               let dragged = livePayloadWorkspaceId() {
+                self.depottPaintMergeTarget(nil)
+                self.retireReorderIndicator()
+                return AppDelegate.shared?.depottMergeWorkspace(dragged, into: mergeTarget) ?? false
+            }
             let targets = self.refreshReorderDropTargets()
             if let performPendingWorkspaceDrop = actions.performPendingWorkspaceDrop {
                 return performPendingWorkspaceDrop(pendingDrop, targets)

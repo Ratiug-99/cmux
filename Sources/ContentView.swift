@@ -2707,7 +2707,10 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                contentAndSidebarLayout(appearance: appearance)
+                VStack(spacing: 0) {
+                    contentAndSidebarLayout(appearance: appearance)
+                    DepottStatusBar()
+                }
 
                 WorkspaceTitlebarModeLayer {
                     workspaceTitlebarBand(appearance: appearance)

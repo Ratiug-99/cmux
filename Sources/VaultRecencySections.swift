@@ -8,6 +8,8 @@ enum VaultSessionSort: String, CaseIterable, Identifiable, Codable, Sendable {
     case created
     case duration
     case folder
+    /// Depott: largest transcript first (one flat list, not day buckets).
+    case size
 
     var id: String { rawValue }
 
@@ -21,6 +23,8 @@ enum VaultSessionSort: String, CaseIterable, Identifiable, Codable, Sendable {
             return String(localized: "sessionIndex.sort.duration", defaultValue: "Duration")
         case .folder:
             return String(localized: "sessionIndex.sort.folder", defaultValue: "Folder")
+        case .size:
+            return String(localized: "sessionIndex.sort.size", defaultValue: "Size")
         }
     }
 
@@ -41,10 +45,20 @@ enum VaultSessionSort: String, CaseIterable, Identifiable, Codable, Sendable {
         case .folder:
             let l = lhs.cwd ?? ""
             let r = rhs.cwd ?? ""
-            if l != r { return l.localizedCaseInsensitiveCompare(r) == .orderedAscending }
+            if l != r { return l.localizedCaseInsensitiveCompare(r) == .orderedAscending }        case .size:
+            let l = Self.fileSize(of: lhs) ?? -1
+            let r = Self.fileSize(of: rhs) ?? -1
+            if l != r { return l > r }
         }
         if lhs.modified != rhs.modified { return lhs.modified > rhs.modified }
         return lhs.id < rhs.id
+    }
+
+    /// Transcript size on disk (one stat), nil when the entry has no file.
+    nonisolated static func fileSize(of entry: SessionEntry) -> Int64? {
+        guard let url = entry.fileURL,
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return nil }
+        return Int64(size)
     }
 
     nonisolated static func sessionDuration(of entry: SessionEntry) -> TimeInterval {
@@ -259,6 +273,23 @@ enum VaultRecencySections {
         }
         guard !visible.isEmpty else { return [] }
 
+        if sort == .size {
+            // Precompute sizes once so sorting does one stat per entry.
+            let sizes = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, VaultSessionSort.fileSize(of: $0) ?? -1) })
+            let sorted = visible.sorted { lhs, rhs in
+                let l = sizes[lhs.id] ?? -1
+                let r = sizes[rhs.id] ?? -1
+                return l != r ? l > r : lhs.modified > rhs.modified
+            }
+            return [IndexSection(
+                key: SectionKey(raw: "size"),
+                title: String(localized: "sessionIndex.sort.size.section", defaultValue: "Largest first"),
+                icon: .day,
+                entries: sorted,
+                accessories: accessories(for: sorted, liveKeys: liveKeys, now: now)
+            )]
+        }
+
         let buckets = Dictionary(grouping: visible) { entry in
             calendar.startOfDay(for: entry.modified)
         }
@@ -286,12 +317,23 @@ enum VaultRecencySections {
         var accessories: [String: VaultSessionRowAccessory] = [:]
         accessories.reserveCapacity(entries.count)
         for entry in entries {
-            accessories[entry.id] = VaultSessionRowAccessory.make(
+            let base = VaultSessionRowAccessory.make(
                 for: entry,
                 liveKeys: liveKeys,
                 now: now,
                 includeDetail: includeDetail
             )
+            // Depott: show transcript size next to folder/branch.
+            if includeDetail, let bytes = VaultSessionSort.fileSize(of: entry) {
+                let sizeText = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                accessories[entry.id] = VaultSessionRowAccessory(
+                    liveStatus: base.liveStatus,
+                    detail: [base.detail, sizeText].compactMap { $0 }.joined(separator: " \u{00B7} "),
+                    messageCount: base.messageCount
+                )
+            } else {
+                accessories[entry.id] = base
+            }
         }
         return accessories
     }

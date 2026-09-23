@@ -221,6 +221,15 @@ final class DepottGridStore {
 extension AppDelegate {
     static var depottGridSymbol: String { "\u{25A6}" }
 
+    /// Every main window's TabManager (status bar agent counts).
+    func depottAllTabManagers() -> [TabManager] {
+        var managers = mainWindowContexts.values.map(\.tabManager)
+        if let tabManager, !managers.contains(where: { $0 === tabManager }) {
+            managers.append(tabManager)
+        }
+        return managers
+    }
+
     func depottIsGridWorkspace(_ workspaceId: UUID, in tabManager: TabManager) -> Bool {
         DepottGridStore.shared.gridWorkspaceIds.contains(workspaceId)
             && tabManager.tabs.contains(where: { $0.id == workspaceId })
@@ -366,8 +375,98 @@ extension AppDelegate {
             focus: false,
             focusWindow: false
         ) else { return nil }
-        depottRecordMember(panelId: panelId, name: name, originalCustomTitle: originalCustomTitle, gridId: grid.id)
+        if DepottGridStore.shared.gridIdByPanelId[panelId] != grid.id {
+            depottRecordMember(panelId: panelId, name: name, originalCustomTitle: originalCustomTitle, gridId: grid.id)
+        }
         return panelId
+    }
+
+    /// Every cross-workspace surface move (tab drag onto a sidebar row, pane
+    /// drop, context menu, socket) lands here, so a workspace that receives an
+    /// agent always becomes a Grid named after its members.
+    func moveSurface(
+        panelId: UUID,
+        toWorkspace targetWorkspaceId: UUID,
+        targetPane: PaneID? = nil,
+        targetIndex: Int? = nil,
+        splitTarget: (orientation: SplitOrientation, insertFirst: Bool)? = nil,
+        focus: Bool = true,
+        focusWindow: Bool = true
+    ) -> Bool {
+        let store = DepottGridStore.shared
+        let origin = locateSurface(surfaceId: panelId)
+        let sourceWorkspace = origin.flatMap { located in
+            located.tabManager.tabs.first(where: { $0.id == located.workspaceId })
+        }
+        // An agent already in a Grid keeps the name it joined with.
+        let memberName = store.memberNameByPanelId[panelId]
+            ?? sourceWorkspace.map { depottDisplayName(of: $0) }
+        let memberCustomTitle = store.gridIdByPanelId[panelId] != nil
+            ? store.originalCustomTitleByPanelId[panelId]
+            : sourceWorkspace?.customTitle
+
+        let moved = depottUnwrappedMoveSurface(
+            panelId: panelId,
+            toWorkspace: targetWorkspaceId,
+            targetPane: targetPane,
+            targetIndex: targetIndex,
+            splitTarget: splitTarget,
+            focus: focus,
+            focusWindow: focusWindow
+        )
+        guard moved,
+              let sourceWorkspace,
+              sourceWorkspace.id != targetWorkspaceId,
+              let tabManager = tabManagerFor(tabId: targetWorkspaceId),
+              let destination = tabManager.tabs.first(where: { $0.id == targetWorkspaceId }),
+              destination.panels.count >= 2 else { return moved }
+
+        depottMakeGrid(destination, tabManager: tabManager)
+        store.originalCustomTitleByPanelId[panelId] = nil
+        depottRecordMember(
+            panelId: panelId,
+            name: memberName ?? depottDisplayName(of: destination),
+            originalCustomTitle: memberCustomTitle,
+            gridId: destination.id
+        )
+        depottScheduleReconcile(gridId: destination.id, tabManager: tabManager)
+        return moved
+    }
+
+    /// Sidebar list: dropping one workspace row onto another merges every agent
+    /// of the dragged workspace into the target, which becomes a Grid.
+    @discardableResult
+    func depottMergeWorkspace(_ workspaceId: UUID, into targetWorkspaceId: UUID) -> Bool {
+        guard depottCanDropWorkspace(workspaceId, ontoWorkspace: targetWorkspaceId),
+              let tabManager = tabManagerFor(tabId: targetWorkspaceId),
+              let source = tabManager.tabs.first(where: { $0.id == workspaceId }),
+              let target = tabManager.tabs.first(where: { $0.id == targetWorkspaceId }) else { return false }
+
+        depottMakeGrid(target, tabManager: tabManager)
+        var lastPanelId: UUID?
+        for panelId in source.sidebarOrderedPanelIds() {
+            let split = depottSplitTarget(in: target)
+            let name = DepottGridStore.shared.memberNameByPanelId[panelId] ?? depottDisplayName(of: source)
+            let originalCustomTitle = source.customTitle
+            guard moveSurface(
+                panelId: panelId,
+                toWorkspace: target.id,
+                targetPane: split.pane,
+                splitTarget: (split.orientation, false),
+                focus: false,
+                focusWindow: false
+            ) else { continue }
+            if DepottGridStore.shared.gridIdByPanelId[panelId] != target.id {
+                depottRecordMember(panelId: panelId, name: name, originalCustomTitle: originalCustomTitle, gridId: target.id)
+            }
+            lastPanelId = panelId
+        }
+        guard lastPanelId != nil else {
+            depottReconcile(gridId: target.id, tabManager: tabManager)
+            return false
+        }
+        depottFinishJoin(grid: target, focusPanelId: lastPanelId, tabManager: tabManager)
+        return true
     }
 
     private func depottFinishJoin(grid: Workspace, focusPanelId: UUID?, tabManager: TabManager) {

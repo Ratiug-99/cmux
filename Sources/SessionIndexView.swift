@@ -263,6 +263,7 @@ struct SessionIndexView: View {
             VaultAllSessionsBar(
                 searchText: $searchText,
                 isCompactView: $isCompactView,
+                sort: $store.recencySort,
                 onPeekTopResult: { peekTopSearchResult() },
                 onResumeTopResult: { resumeTopSearchResult() }
             )

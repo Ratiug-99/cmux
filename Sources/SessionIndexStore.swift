@@ -815,7 +815,8 @@ final class SessionIndexStore: ObservableObject {
 
     // MARK: - Scanning
 
-    nonisolated static let perAgentLimit = 30
+    /// Depott: show every session, not just the newest 30 per agent.
+    nonisolated static let perAgentLimit = 1000
     nonisolated static let headByteCap = 64 * 1024
     nonisolated static let tailByteCap = 32 * 1024
     nonisolated static let antigravityHistoryByteCap = 16 * 1024 * 1024
