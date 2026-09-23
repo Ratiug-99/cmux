@@ -363,6 +363,7 @@ struct SidebarWorkspaceRowMenuBuilder {
         guard let app = AppDelegate.shared else { return }
         if app.depottIsGridWorkspace(tab.id, in: tabManager) {
             let focusedPanelId = tab.focusedPanelId
+            let gridId = tab.id
             menu.addItem(item(
                 String(localized: "depott.grid.removeFocused", defaultValue: "Remove Focused Agent from Grid"),
                 enabled: focusedPanelId != nil
@@ -374,7 +375,7 @@ struct SidebarWorkspaceRowMenuBuilder {
                 String(localized: "depott.grid.dissolve", defaultValue: "Dissolve Grid")
             ) { [weak tabManager] in
                 guard let tabManager else { return }
-                AppDelegate.shared?.depottDissolveGrid(tabManager: tabManager)
+                AppDelegate.shared?.depottDissolveGrid(gridId: gridId, tabManager: tabManager)
             })
         } else {
             let workspaceIds = targetIds.filter { !app.depottIsGridWorkspace($0, in: tabManager) }
