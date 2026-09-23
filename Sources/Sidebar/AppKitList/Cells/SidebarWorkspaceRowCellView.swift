@@ -490,6 +490,19 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
         titleView.font = .systemFont(ofSize: model.scaled(12.5), weight: .semibold)
         titleView.textColor = palette.primaryText
         titleView.alphaValue = snapshot.isMuted ? 0.6 : 1
+        if let surfaceBadge = Self.depottSurfaceBadge(
+            terminals: snapshot.terminalCount,
+            browsers: snapshot.browserCount,
+            fontSize: model.scaled(10.5),
+            color: palette.secondary(0.75)
+        ), let titleFont = titleView.font {
+            let composed = NSMutableAttributedString(
+                string: boundedTitle,
+                attributes: [.font: titleFont, .foregroundColor: palette.primaryText]
+            )
+            composed.append(surfaceBadge)
+            titleView.attributedStringValue = composed
+        }
 
         // Badges / spinner / close
         let showsSpinner = model.showsAgentActivity && snapshot.activeCodingAgentCount > 0
@@ -683,6 +696,46 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
             )
         leadingSpinner?.toolTip = tooltip
         trailingSpinner?.toolTip = tooltip
+    }
+
+    /// Depott: "  ▣ 3  ◎ 1" suffix, shown only when a workspace holds more than
+    /// one terminal or any browser, so multi-surface workspaces stand out.
+    static func depottSurfaceBadge(
+        terminals: Int,
+        browsers: Int,
+        fontSize: CGFloat,
+        color: NSColor
+    ) -> NSAttributedString? {
+        guard terminals > 1 || browsers > 0 else { return nil }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .medium)
+        let result = NSMutableAttributedString(string: "  ", attributes: [.font: font])
+        func append(symbol: String, count: Int) {
+            guard count > 0 else { return }
+            let config = NSImage.SymbolConfiguration(pointSize: fontSize, weight: .medium)
+            if let symbolImage = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(config) {
+                let tinted = NSImage(size: symbolImage.size, flipped: false) { rect in
+                    symbolImage.draw(in: rect)
+                    color.set()
+                    rect.fill(using: .sourceAtop)
+                    return true
+                }
+                let attachment = NSTextAttachment()
+                attachment.image = tinted
+                attachment.bounds = CGRect(
+                    x: 0, y: font.descender * 0.6,
+                    width: symbolImage.size.width, height: symbolImage.size.height
+                )
+                result.append(NSAttributedString(attachment: attachment))
+            }
+            result.append(NSAttributedString(
+                string: "\u{2009}\(count)  ",
+                attributes: [.font: font, .foregroundColor: color]
+            ))
+        }
+        append(symbol: "terminal", count: terminals)
+        append(symbol: "globe", count: browsers)
+        return result
     }
 
     private static func updateSpinner(

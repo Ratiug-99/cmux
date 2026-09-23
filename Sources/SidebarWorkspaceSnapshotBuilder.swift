@@ -74,6 +74,9 @@ struct SidebarWorkspaceSnapshotBuilder {
         let checklistFirstUncheckedText: String?
         var taskStatusInput = SidebarWorkspaceTaskStatusSnapshot()
         var deviceWorkspaceLabel: String? = nil
+        /// Depott: how many terminals / browsers this workspace holds.
+        var terminalCount: Int = 0
+        var browserCount: Int = 0
 
         var remoteWorkspaceBadgeLabel: String? { deviceWorkspaceLabel ?? cloudWorkspaceLabel }
         var remoteWorkspaceBadgeSymbol: String { deviceWorkspaceLabel == nil ? "cloud" : "desktopcomputer" }

@@ -18,6 +18,16 @@ struct SidebarWorkspaceSnapshotFactory {
 
     /// Creates the current immutable presentation snapshot for the workspace row.
     func makeSnapshot() -> SidebarWorkspaceSnapshotBuilder.Snapshot {
+        var snapshot = makeBaseSnapshot()
+        // Depott: surface counts so rows show when a workspace holds several.
+        for panel in workspace.panels.values {
+            if panel is TerminalPanel { snapshot.terminalCount += 1 }
+            else if panel is BrowserPanel { snapshot.browserCount += 1 }
+        }
+        return snapshot
+    }
+
+    private func makeBaseSnapshot() -> SidebarWorkspaceSnapshotBuilder.Snapshot {
         let detailVisibility = settings.visibleAuxiliaryDetails
         let orderedPanelIds = workspace.sidebarOrderedPanelIds()
         let cloud = CloudWorkspaceSidebarPresentation(workspace: workspace, orderedPanelIDs: orderedPanelIds, usesLastSegmentPath: settings.usesLastSegmentPath)

@@ -295,6 +295,70 @@ extension AppDelegate {
         return added
     }
 
+    /// Drag & drop: a sidebar agent row dropped on a tile joins the Grid at that
+    /// tile, on the side it was dropped (center = split along the tile's longer
+    /// side). Dropping onto a workspace while no Grid exists makes that workspace
+    /// the Grid. Drops onto a non-Grid workspace when a Grid already exists, or an
+    /// agent onto itself, are rejected.
+    func depottCanDropWorkspace(_ workspaceId: UUID, ontoWorkspace targetWorkspaceId: UUID) -> Bool {
+        guard workspaceId != targetWorkspaceId,
+              let tabManager = tabManagerFor(tabId: targetWorkspaceId),
+              tabManager.tabs.contains(where: { $0.id == workspaceId }) else { return false }
+        guard let grid = depottGridWorkspace(in: tabManager) else { return true }
+        return grid.id == targetWorkspaceId
+    }
+
+    @discardableResult
+    func depottDropWorkspaceIntoGrid(
+        workspaceId: UUID,
+        targetWorkspaceId: UUID,
+        targetPane: PaneID,
+        zone: DropZone
+    ) -> Bool {
+        guard depottCanDropWorkspace(workspaceId, ontoWorkspace: targetWorkspaceId),
+              let tabManager = tabManagerFor(tabId: targetWorkspaceId),
+              let source = tabManager.tabs.first(where: { $0.id == workspaceId }),
+              let target = tabManager.tabs.first(where: { $0.id == targetWorkspaceId }),
+              let panelId = source.focusedPanelId ?? source.panels.keys.first else { return false }
+        let store = DepottGridStore.shared
+
+        if depottGridWorkspace(in: tabManager) == nil {
+            // No Grid yet: the workspace being dropped onto becomes the Grid.
+            if let custom = target.customTitle {
+                for existing in target.panels.keys { store.originalCustomTitleByPanelId[existing] = custom }
+            }
+            store.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] = target.id
+            tabManager.setCustomTitle(tabId: target.id, title: Self.depottGridTitle)
+        }
+
+        let split: (orientation: SplitOrientation, insertFirst: Bool)
+        switch zone {
+        case .left: split = (.horizontal, true)
+        case .right: split = (.horizontal, false)
+        case .top: split = (.vertical, true)
+        case .bottom: split = (.vertical, false)
+        case .center:
+            let frame = target.bonsplitController.layoutSnapshot().panes
+                .first(where: { $0.paneId == targetPane.id.uuidString })?.frame
+            let wide = (frame?.width ?? 1) >= (frame?.height ?? 0)
+            split = (wide ? .horizontal : .vertical, false)
+        }
+
+        let originalCustomTitle = source.customTitle
+        guard moveSurface(
+            panelId: panelId,
+            toWorkspace: target.id,
+            targetPane: targetPane,
+            splitTarget: split,
+            focus: false,
+            focusWindow: false
+        ) else { return false }
+        if let originalCustomTitle { store.originalCustomTitleByPanelId[panelId] = originalCustomTitle }
+        _ = tabManager.equalizeSplits(tabId: target.id)
+        tabManager.focusTab(target.id, surfaceId: panelId, suppressFlash: true)
+        return true
+    }
+
     /// Pops one agent out of the Grid, back into its own workspace.
     @discardableResult
     func depottRemoveFromGrid(panelId: UUID, tabManager: TabManager) -> Bool {

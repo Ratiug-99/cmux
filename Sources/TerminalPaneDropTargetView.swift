@@ -28,6 +28,7 @@ final class PaneDropTargetView: NSView {
         super.init(frame: frameRect)
         registerForDraggedTypes(Array(Set([
             DragOverlayRoutingPolicy.bonsplitTabTransferType,
+            DragOverlayRoutingPolicy.sidebarTabReorderType,
         ]).union(PasteboardFileURLReader.fileURLPasteboardTypes)))
         setupDropZoneOverlayView()
     }
@@ -107,7 +108,18 @@ final class PaneDropTargetView: NSView {
 #if DEBUG
         logHitTestDecision(capture: capture, pasteboardTypes: pasteboardTypes, eventType: eventType)
 #endif
-        return capture ? self : nil
+        let hasSidebarWorkspaceDrag = dropContext?.isDockHosted == false
+            && DragOverlayRoutingPolicy.hasSidebarTabReorder(pasteboardTypes)
+        return (capture || hasSidebarWorkspaceDrag) ? self : nil
+    }
+
+    /// Depott: workspace id of a sidebar agent row being dragged, if any.
+    private func sidebarWorkspaceDragId(_ sender: any NSDraggingInfo) -> UUID? {
+        guard dropContext?.isDockHosted == false,
+              DragOverlayRoutingPolicy.hasSidebarTabReorder(sender.draggingPasteboard.types) else { return nil }
+        return SidebarTabDragPayload.workspaceId(
+            fromPasteboardString: SidebarTabDragPayload.pasteboardString(from: sender.draggingPasteboard)
+        )
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -143,6 +155,9 @@ final class PaneDropTargetView: NSView {
         guard let dropContext else {
             transferDropRouter.clear()
             return false
+        }
+        if let workspaceId = sidebarWorkspaceDragId(sender) {
+            return AppDelegate.shared?.depottCanDropWorkspace(workspaceId, ontoWorkspace: dropContext.workspaceId) == true
         }
         guard let container = transferDropRouter.container(for: dropContext) else {
             return false
@@ -187,6 +202,15 @@ final class PaneDropTargetView: NSView {
             cmuxDebugLog("terminal.paneDrop.perform allowed=0 reason=missingContext")
 #endif
             return false
+        }
+
+        if let workspaceId = sidebarWorkspaceDragId(sender) {
+            return AppDelegate.shared?.depottDropWorkspaceIntoGrid(
+                workspaceId: workspaceId,
+                targetWorkspaceId: dropContext.workspaceId,
+                targetPane: dropContext.paneId,
+                zone: paneDropZone(for: sender)
+            ) ?? false
         }
 
         guard let container = transferDropRouter.container(for: dropContext) else {
@@ -297,6 +321,15 @@ final class PaneDropTargetView: NSView {
         guard let dropContext else {
             clearDragState(phase: "\(phase).reject")
             return []
+        }
+
+        if let workspaceId = sidebarWorkspaceDragId(sender) {
+            guard AppDelegate.shared?.depottCanDropWorkspace(workspaceId, ontoWorkspace: dropContext.workspaceId) == true else {
+                clearDragState(phase: "\(phase).sidebarReject")
+                return []
+            }
+            setActiveDropZone(paneDropZone(for: sender))
+            return .move
         }
 
         guard let container = transferDropRouter.container(for: dropContext) else {
