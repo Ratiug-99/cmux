@@ -1,5 +1,6 @@
 import Foundation
 import CmuxSettings
+import Bonsplit
 
 struct SurfaceNewWorkspaceMoveResult {
     let sourceWindowId: UUID
@@ -187,5 +188,151 @@ extension AppDelegate {
         }
 
         return String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
+    }
+}
+
+// MARK: - Depott Grid
+
+/// Depott: compose existing agents (sidebar workspaces) into one tiled Grid
+/// workspace. The first agent added lends its workspace as the Grid; later
+/// agents' surfaces move in as splits of the largest tile. Removing a tile
+/// pops it back into its own workspace with its original name; removing the
+/// last tile turns the Grid back into that agent's workspace.
+@MainActor
+final class DepottGridStore {
+    static let shared = DepottGridStore()
+    /// Grid workspace id, per tab manager (one Grid per window).
+    var gridWorkspaceIdByManager: [ObjectIdentifier: UUID] = [:]
+    /// Custom title the agent's workspace had before joining (only when set).
+    var originalCustomTitleByPanelId: [UUID: String] = [:]
+}
+
+@MainActor
+extension AppDelegate {
+    static var depottGridTitle: String {
+        String(localized: "depott.grid.title", defaultValue: "▦ Grid")
+    }
+
+    func depottGridWorkspace(in tabManager: TabManager) -> Workspace? {
+        guard let id = DepottGridStore.shared.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] else {
+            return nil
+        }
+        guard let grid = tabManager.tabs.first(where: { $0.id == id }) else {
+            // The Grid workspace was closed by the user; forget it.
+            DepottGridStore.shared.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] = nil
+            return nil
+        }
+        return grid
+    }
+
+    func depottIsGridWorkspace(_ workspaceId: UUID, in tabManager: TabManager) -> Bool {
+        depottGridWorkspace(in: tabManager)?.id == workspaceId
+    }
+
+    /// Largest pane in the Grid and the axis to split it along (its longer side),
+    /// so successive adds form a grid (2x2 at four tiles) instead of a strip.
+    private func depottSplitTarget(in grid: Workspace) -> (pane: PaneID?, orientation: SplitOrientation) {
+        let panes = grid.bonsplitController.layoutSnapshot().panes
+        guard let biggest = panes.max(by: {
+            $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
+        }) else {
+            return (nil, .horizontal)
+        }
+        let pane = grid.bonsplitController.allPaneIds.first(where: { $0.id.uuidString == biggest.paneId })
+        let orientation: SplitOrientation = biggest.frame.width >= biggest.frame.height ? .horizontal : .vertical
+        return (pane, orientation)
+    }
+
+    /// Adds the given workspaces' focused agents to the Grid. Returns how many joined.
+    @discardableResult
+    func depottAddToGrid(workspaceIds: [UUID], tabManager: TabManager) -> Int {
+        let store = DepottGridStore.shared
+        var added = 0
+        var lastPanelId: UUID?
+        for workspaceId in workspaceIds {
+            guard !depottIsGridWorkspace(workspaceId, in: tabManager),
+                  let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }),
+                  let panelId = workspace.focusedPanelId ?? workspace.panels.keys.first else {
+                continue
+            }
+            let originalCustomTitle = workspace.customTitle
+
+            if let grid = depottGridWorkspace(in: tabManager) {
+                let target = depottSplitTarget(in: grid)
+                guard moveSurface(
+                    panelId: panelId,
+                    toWorkspace: grid.id,
+                    targetPane: target.pane,
+                    splitTarget: (orientation: target.orientation, insertFirst: false),
+                    focus: false,
+                    focusWindow: false
+                ) else { continue }
+            } else if workspace.panels.count == 1 {
+                // First agent with a single surface: its workspace becomes the Grid.
+                store.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] = workspace.id
+                tabManager.setCustomTitle(tabId: workspace.id, title: Self.depottGridTitle)
+            } else {
+                // First agent shares its workspace: pop its surface into a new Grid.
+                guard let result = moveSurfaceToNewWorkspace(
+                    panelId: panelId,
+                    destinationManager: tabManager,
+                    title: Self.depottGridTitle,
+                    focus: false,
+                    focusWindow: false
+                ) else { continue }
+                store.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] = result.destinationWorkspaceId
+            }
+
+            if let originalCustomTitle { store.originalCustomTitleByPanelId[panelId] = originalCustomTitle }
+            lastPanelId = panelId
+            added += 1
+        }
+
+        if added > 0, let grid = depottGridWorkspace(in: tabManager) {
+            _ = tabManager.equalizeSplits(tabId: grid.id)
+            tabManager.focusTab(grid.id, surfaceId: lastPanelId, suppressFlash: true)
+        }
+        return added
+    }
+
+    /// Pops one agent out of the Grid, back into its own workspace.
+    @discardableResult
+    func depottRemoveFromGrid(panelId: UUID, tabManager: TabManager) -> Bool {
+        let store = DepottGridStore.shared
+        guard let grid = depottGridWorkspace(in: tabManager), grid.panels[panelId] != nil else {
+            return false
+        }
+        let restoreTitle = store.originalCustomTitleByPanelId[panelId]
+
+        if grid.panels.count > 1 {
+            guard moveSurfaceToNewWorkspace(
+                panelId: panelId,
+                destinationManager: tabManager,
+                title: restoreTitle,
+                focus: false,
+                focusWindow: false
+            ) != nil else { return false }
+            store.originalCustomTitleByPanelId[panelId] = nil
+            _ = tabManager.equalizeSplits(tabId: grid.id)
+            return true
+        }
+
+        // Last tile: the Grid turns back into this agent's own workspace.
+        if let restoreTitle {
+            tabManager.setCustomTitle(tabId: grid.id, title: restoreTitle)
+        } else {
+            tabManager.clearCustomTitle(tabId: grid.id)
+        }
+        store.originalCustomTitleByPanelId[panelId] = nil
+        store.gridWorkspaceIdByManager[ObjectIdentifier(tabManager)] = nil
+        return true
+    }
+
+    /// Pops every agent out of the Grid.
+    func depottDissolveGrid(tabManager: TabManager) {
+        guard let grid = depottGridWorkspace(in: tabManager) else { return }
+        for panelId in Array(grid.panels.keys) {
+            _ = depottRemoveFromGrid(panelId: panelId, tabManager: tabManager)
+        }
     }
 }

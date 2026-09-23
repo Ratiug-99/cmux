@@ -329,6 +329,8 @@ struct SidebarWorkspaceRowMenuBuilder {
         menu.addItem(.separator())
         addMoveItems(to: menu, tabManager: tabManager)
         menu.addItem(.separator())
+        addDepottGridItems(to: menu, tabManager: tabManager)
+        menu.addItem(.separator())
         addCloseItems(to: menu, tabManager: tabManager)
         // The notification section needs the store; the rest of the menu
         // must not disappear with it.
@@ -354,6 +356,39 @@ struct SidebarWorkspaceRowMenuBuilder {
             item.keyEquivalentModifierMask = shortcut.modifierFlags
         }
         return item
+    }
+
+    /// Depott: compose agents into the tiled Grid workspace.
+    private func addDepottGridItems(to menu: NSMenu, tabManager: TabManager) {
+        guard let app = AppDelegate.shared else { return }
+        if app.depottIsGridWorkspace(tab.id, in: tabManager) {
+            let focusedPanelId = tab.focusedPanelId
+            menu.addItem(item(
+                String(localized: "depott.grid.removeFocused", defaultValue: "Remove Focused Agent from Grid"),
+                enabled: focusedPanelId != nil
+            ) { [weak tabManager] in
+                guard let tabManager, let focusedPanelId else { return }
+                _ = AppDelegate.shared?.depottRemoveFromGrid(panelId: focusedPanelId, tabManager: tabManager)
+            })
+            menu.addItem(item(
+                String(localized: "depott.grid.dissolve", defaultValue: "Dissolve Grid")
+            ) { [weak tabManager] in
+                guard let tabManager else { return }
+                AppDelegate.shared?.depottDissolveGrid(tabManager: tabManager)
+            })
+        } else {
+            let workspaceIds = targetIds.filter { !app.depottIsGridWorkspace($0, in: tabManager) }
+            menu.addItem(item(
+                label(
+                    multi: String(localized: "depott.grid.addMany", defaultValue: "Add Workspaces to Grid"),
+                    single: String(localized: "depott.grid.addOne", defaultValue: "Add to Grid")
+                ),
+                enabled: !workspaceIds.isEmpty
+            ) { [weak tabManager] in
+                guard let tabManager else { return }
+                _ = AppDelegate.shared?.depottAddToGrid(workspaceIds: workspaceIds, tabManager: tabManager)
+            })
+        }
     }
 
     private func addPinItem(to menu: NSMenu, tabManager: TabManager) {
