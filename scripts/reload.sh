@@ -1579,6 +1579,16 @@ if [[ -z "$TAG" ]]; then
   )
 fi
 XCODEBUILD_ARGS+=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID")
+# Depott: sign with a stable local identity (e.g. "Depott Local") so macOS
+# privacy grants (Photos, Music, folders) survive rebuilds. Ad-hoc signatures
+# change on every build and make TCC ask again.
+if [[ -z "${DEPOTT_CODE_SIGN_IDENTITY+set}" ]] \
+   && security find-identity -v -p codesigning 2>/dev/null | grep -q '"Depott Local"'; then
+  DEPOTT_CODE_SIGN_IDENTITY="Depott Local"
+fi
+if [[ -n "${DEPOTT_CODE_SIGN_IDENTITY:-}" ]]; then
+  XCODEBUILD_ARGS+=(CODE_SIGN_IDENTITY="$DEPOTT_CODE_SIGN_IDENTITY" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
+fi
 # The helper is assembled before Xcode emits the host's processed Info.plist.
 # Pass the final tagged display name explicitly so its TCC entry matches the
 # app the user is dogfooding instead of falling back to the untagged product.
