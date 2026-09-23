@@ -2,7 +2,10 @@
 """Execute E2E cache setup, cleanup and compiler command construction."""
 import os
 from pathlib import Path
+import select
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -70,6 +73,7 @@ class E2ECompilationCache(unittest.TestCase):
         self.assertNotEqual(original, self.prepare()['fingerprint'])
 
     def test_both_test_targets_enable_cache_without_changing_selectors(self):
+        self.assertEqual(step('Install zig')['if'], "${{ steps.filter.outputs.target == 'cmuxUITests' }}")
         values = self.prepare()
         script = step('Run selected tests')['run']
         start = script.index('if [ "$TEST_TARGET" = "cmuxTests" ]; then')
@@ -89,6 +93,35 @@ class E2ECompilationCache(unittest.TestCase):
                 self.assertIn('COMPILATION_CACHE_CAS_PATH=' + values['CMUX_E2E_COMPILATION_CACHE'], args)
                 self.assertIn('-only-testing:' + target + '/Focused', args)
                 self.assertEqual(args[-1], 'test')
+                self.assertEqual('CMUX_SKIP_ZIG_BUILD=1' in args, target == 'cmuxTests')
+
+    def test_unit_helper_skip_uses_clang_without_invoking_zig(self):
+        zig = self.root / 'bin' / 'zig'
+        zig.write_text('#!/bin/sh\necho unexpected-zig-invocation >&2\nexit 99\n')
+        zig.chmod(0o755)
+        xcrun = self.root / 'bin' / 'xcrun'
+        xcrun.write_text('''#!/bin/sh
+test "$1" = clang || exit 98
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    shift
+    printf 'fixture-clang-output' > "$1"
+    exit 0
+  fi
+  shift
+done
+exit 97
+''')
+        xcrun.chmod(0o755)
+        output = self.root / 'ghostty-helper'
+        result = subprocess.run([
+            'bash', str(ROOT / 'scripts/build-ghostty-cli-helper.sh'),
+            '--target', 'aarch64-macos', '--output', str(output),
+        ], env=dict(self.env, CMUX_SKIP_ZIG_BUILD='1', ZIG_REQUIRED='0.0.0'),
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), 'fixture-clang-output')
+        self.assertIn('Skipping zig CLI helper build', result.stdout)
 
     def test_cleanup_removes_only_owned_paths(self):
         values = self.prepare()
@@ -177,6 +210,97 @@ class E2ECompilationCache(unittest.TestCase):
             self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
 
 
+
+
+class E2ECapturePreflight(unittest.TestCase):
+    def test_capture_failure_stops_before_dependency_setup(self):
+        for mode in ('ok', 'failure', 'empty', 'timeout', 'no-user'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                tools = root / 'bin'
+                tools.mkdir()
+                trace = root / 'trace'
+                child_pipe = root / 'child-lifetime'
+                os.mkfifo(child_pipe)
+                child_reader = os.open(child_pipe, os.O_RDONLY | os.O_NONBLOCK)
+                self.addCleanup(os.close, child_reader)
+                fake = '''#!PYTHON
+import json, os, pathlib, signal, subprocess, sys
+name = pathlib.Path(sys.argv[0]).name
+mode = os.environ['CAPTURE_FIXTURE_MODE']
+if name == 'stat':
+    print('root' if mode == 'no-user' else 'runner')
+elif name == 'id':
+    print('501')
+else:
+    pathlib.Path(os.environ['CAPTURE_FIXTURE_TRACE']).write_text(json.dumps(sys.argv[1:]))
+    if mode == 'timeout':
+        subprocess.Popen([sys.executable, '-c',
+            'import os,pathlib,signal; '
+            'fd=os.open(os.environ["CAPTURE_CHILD_PIPE"],os.O_WRONLY); '
+            'pathlib.Path(os.environ["CAPTURE_CHILD_PID"]).write_text(str(os.getpid())); '
+            'signal.pause()'])
+        signal.pause()
+    if mode == 'failure':
+        print('could not create image from display', file=sys.stderr)
+        sys.exit(1)
+    pathlib.Path(sys.argv[-1]).write_bytes(b'frame' if mode == 'ok' else b'')
+'''.replace('PYTHON', sys.executable)
+                for name in ('stat', 'id', 'sudo'):
+                    command = tools / name
+                    source = fake
+                    if name == 'stat':
+                        source = '#!/bin/sh\nif [ "$CAPTURE_FIXTURE_MODE" = no-user ]; then echo root; else echo runner; fi\n'
+                    elif name == 'id':
+                        source = '#!/bin/sh\necho 501\n'
+                    command.write_text(source)
+                    command.chmod(0o755)
+                env = dict(os.environ, PATH=str(tools) + ':' + os.environ['PATH'],
+                           RUNNER_TEMP=str(root), CAPTURE_FIXTURE_MODE=mode,
+                           CAPTURE_FIXTURE_TRACE=str(trace),
+                           CAPTURE_CHILD_PIPE=str(child_pipe),
+                           CAPTURE_CHILD_PID=str(root / 'child-pid'))
+                # Execute the workflow's actual preflight, with a short test-only
+                # timeout, before substituting an expensive setup side effect.
+                reached = root / 'dependency-setup'
+                command = ''
+                for entry in STEPS:
+                    if entry.get('name') == 'Verify screen capture before dependency setup':
+                        timeout = '2' if mode == 'timeout' else '10'
+                        command += entry['run'].rstrip() + ' --timeout-seconds ' + timeout + '\n'
+                    if entry.get('name') in ('Setup Bun', 'Download pre-built GhosttyKit.xcframework',
+                                             'Install zig', 'Install Rust', 'Prepare isolated DerivedData'):
+                        command += 'touch "$RUNNER_TEMP/dependency-setup"\n'
+                        break
+                result = subprocess.run(['bash', '-eu', '-o', 'pipefail', '-c', command],
+                                        cwd=ROOT, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, mode == 'ok', result.stderr)
+                self.assertEqual(reached.exists(), mode == 'ok')
+                self.assertEqual(list(root.glob('cmux-capture-preflight-*')), [])
+                if mode != 'no-user':
+                    self.assertTrue(trace.exists(), result.stderr)
+                    import json
+                    self.assertEqual(json.loads(trace.read_text())[:-1], [
+                        '-n', 'launchctl', 'asuser', '501', 'sudo', '-n', '-H', '-u',
+                        'runner', '/usr/sbin/screencapture', '-x', '-t', 'jpg', '-D', '1'])
+                if mode == 'failure':
+                    self.assertIn('could not create image from display', result.stderr)
+                if mode == 'timeout':
+                    self.assertIn('exceeded 2 seconds', result.stderr)
+                    # The PID receipt proves the child opened its lifetime
+                    # pipe. EOF is causal proof it no longer owns that pipe;
+                    # this bounded wait does not assume a scheduling delay.
+                    child_pid = int((root / 'child-pid').read_text())
+                    try:
+                        ready, _, _ = select.select([child_reader], [], [], 3)
+                        self.assertTrue(ready, 'capture descendant survived timeout')
+                        self.assertEqual(os.read(child_reader, 1), b'')
+                    finally:
+                        # Clean up the deliberately surviving negative control.
+                        try:
+                            os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
 
 if __name__ == '__main__':
